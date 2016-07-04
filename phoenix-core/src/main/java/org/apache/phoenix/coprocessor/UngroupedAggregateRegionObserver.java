@@ -30,6 +30,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -58,6 +59,7 @@ import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.ScanType;
 import org.apache.hadoop.hbase.regionserver.Store;
+import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.io.WritableUtils;
@@ -115,7 +117,7 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
-import co.cask.tephra.TxConstants;
+import org.apache.tephra.TxConstants;
 
 
 /**
@@ -165,6 +167,9 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
             throws IOException {
         s = super.preScannerOpen(e, scan, s);
         if (ScanUtil.isAnalyzeTable(scan)) {
+            if (!ScanUtil.isLocalIndex(scan)) {
+                scan.getFamilyMap().clear();
+            }
             // We are setting the start row and stop row such that it covers the entire region. As part
             // of Phonenix-1263 we are storing the guideposts against the physical table rather than
             // individual tenant specific tables.
@@ -180,6 +185,7 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
         RegionCoprocessorEnvironment env = c.getEnvironment();
         Region region = env.getRegion();
         long ts = scan.getTimeRange().getMax();
+        boolean localIndexScan = ScanUtil.isLocalIndex(scan);
         if (ScanUtil.isAnalyzeTable(scan)) {
             byte[] gp_width_bytes =
                     scan.getAttribute(BaseScannerRegionObserver.GUIDEPOST_WIDTH_BYTES);
@@ -192,7 +198,7 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
             return collectStats(s, statsCollector, region, scan, env.getConfiguration());
         }
         int offsetToBe = 0;
-        if (ScanUtil.isLocalIndex(scan)) {
+        if (localIndexScan) {
             /*
              * For local indexes, we need to set an offset on row key expressions to skip
              * the region start key.
@@ -202,7 +208,7 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
             ScanUtil.setRowKeyOffset(scan, offsetToBe);
         }
         final int offset = offsetToBe;
-
+        
         PTable projectedTable = null;
         PTable writeToTable = null;
         byte[][] values = null;
@@ -238,6 +244,7 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
             projectedTable = deserializeTable(upsertSelectTable);
             selectExpressions = deserializeExpressions(scan.getAttribute(BaseScannerRegionObserver.UPSERT_SELECT_EXPRS));
             values = new byte[projectedTable.getPKColumns().size()][];
+            
         } else {
             byte[] isDeleteAgg = scan.getAttribute(BaseScannerRegionObserver.DELETE_AGG);
             isDelete = isDeleteAgg != null && Bytes.compareTo(PDataType.TRUE_BYTES, isDeleteAgg) == 0;
@@ -248,22 +255,19 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
             emptyCF = scan.getAttribute(BaseScannerRegionObserver.EMPTY_CF);
         }
         TupleProjector tupleProjector = null;
-        Region dataRegion = null;
         byte[][] viewConstants = null;
         ColumnReference[] dataColumns = IndexUtil.deserializeDataTableColumnsToJoin(scan);
-        boolean localIndexScan = ScanUtil.isLocalIndex(scan);
         final TupleProjector p = TupleProjector.deserializeProjectorFromScan(scan);
         final HashJoinInfo j = HashJoinInfo.deserializeHashJoinFromScan(scan);
         if ((localIndexScan && !isDelete && !isDescRowKeyOrderUpgrade) || (j == null && p != null)) {
             if (dataColumns != null) {
                 tupleProjector = IndexUtil.getTupleProjector(scan, dataColumns);
-                dataRegion = IndexUtil.getDataRegion(env);
                 viewConstants = IndexUtil.deserializeViewConstantsFromScan(scan);
             }
             ImmutableBytesWritable tempPtr = new ImmutableBytesWritable();
             theScanner =
                     getWrappedScanner(c, theScanner, offset, scan, dataColumns, tupleProjector, 
-                            dataRegion, indexMaintainers == null ? null : indexMaintainers.get(0), viewConstants, p, tempPtr);
+                        region, indexMaintainers == null ? null : indexMaintainers.get(0), viewConstants, p, tempPtr);
         } 
         
         if (j != null)  {
@@ -513,7 +517,8 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
                             // Commit in batches based on UPSERT_BATCH_SIZE_ATTRIB in config
                             if (!indexMutations.isEmpty() && batchSize > 0 &&
                                     indexMutations.size() % batchSize == 0) {
-                                commitIndexMutations(c, region, indexMutations);
+                                commitBatch(region, indexMutations, null);
+                                indexMutations.clear();
                             }
                         } catch (ConstraintViolationException e) {
                             // Log and ignore in count
@@ -544,7 +549,8 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
         }
 
         if (!indexMutations.isEmpty()) {
-            commitIndexMutations(c, region, indexMutations);
+            commitBatch(region,indexMutations, null);
+            indexMutations.clear();
         }
 
         final boolean hadAny = hasAny;
@@ -579,52 +585,36 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
         return scanner;
     }
 
-    private void commitIndexMutations(final ObserverContext<RegionCoprocessorEnvironment> c,
-            Region region, List<Mutation> indexMutations) throws IOException {
-        // Get indexRegion corresponding to data region
-        Region indexRegion = IndexUtil.getIndexRegion(c.getEnvironment());
-        if (indexRegion != null) {
-            commitBatch(indexRegion, indexMutations, null);
-        } else {
-            TableName indexTable =
-                    TableName.valueOf(MetaDataUtil.getLocalIndexPhysicalName(region.getTableDesc()
-                            .getName()));
-            HTableInterface table = null;
-            try {
-                table = c.getEnvironment().getTable(indexTable);
-                table.batch(indexMutations);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                ServerUtil.throwIOException(c.getEnvironment().getRegion().getRegionInfo().getRegionNameAsString(),
-                    ie);
-            } finally {
-                if (table != null) table.close();
-             }
-        }
-        indexMutations.clear();
-    }
-
     @Override
-    public InternalScanner preCompact(ObserverContext<RegionCoprocessorEnvironment> c, final Store store,
-            InternalScanner scanner, final ScanType scanType) throws IOException {
-        TableName table = c.getEnvironment().getRegion().getRegionInfo().getTable();
-        InternalScanner internalScanner = scanner;
-        if (scanType.equals(ScanType.COMPACT_DROP_DELETES)) {
-            try {
-                long clientTimeStamp = TimeKeeper.SYSTEM.getCurrentTime();
-                StatisticsCollector stats = StatisticsCollectorFactory.createStatisticsCollector(
-                        c.getEnvironment(), table.getNameAsString(), clientTimeStamp,
-                        store.getFamily().getName());
-                internalScanner = stats.createCompactionScanner(c.getEnvironment(), store, scanner);
-            } catch (IOException e) {
-                // If we can't reach the stats table, don't interrupt the normal
-                // compaction operation, just log a warning.
-                if (logger.isWarnEnabled()) {
-                    logger.warn("Unable to collect stats for " + table, e);
+    public InternalScanner preCompact(final ObserverContext<RegionCoprocessorEnvironment> c, final Store store,
+            final InternalScanner scanner, final ScanType scanType) throws IOException {
+        // Compaction and split upcalls run with the effective user context of the requesting user.
+        // This will lead to failure of cross cluster RPC if the effective user is not
+        // the login user. Switch to the login user context to ensure we have the expected
+        // security context.
+        return User.runAsLoginUser(new PrivilegedExceptionAction<InternalScanner>() {
+            @Override
+            public InternalScanner run() throws Exception {
+                TableName table = c.getEnvironment().getRegion().getRegionInfo().getTable();
+                InternalScanner internalScanner = scanner;
+                if (scanType.equals(ScanType.COMPACT_DROP_DELETES)) {
+                    try {
+                        long clientTimeStamp = TimeKeeper.SYSTEM.getCurrentTime();
+                        StatisticsCollector stats = StatisticsCollectorFactory.createStatisticsCollector(
+                            c.getEnvironment(), table.getNameAsString(), clientTimeStamp,
+                            store.getFamily().getName());
+                        internalScanner = stats.createCompactionScanner(c.getEnvironment(), store, scanner);
+                    } catch (IOException e) {
+                        // If we can't reach the stats table, don't interrupt the normal
+                      // compaction operation, just log a warning.
+                      if (logger.isWarnEnabled()) {
+                          logger.warn("Unable to collect stats for " + table, e);
+                      }
+                    }
                 }
+                return internalScanner;
             }
-        }
-        return internalScanner;
+        });
     }
 
     private static PTable deserializeTable(byte[] b) {

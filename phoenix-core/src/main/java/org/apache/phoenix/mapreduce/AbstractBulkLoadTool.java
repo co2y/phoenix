@@ -183,10 +183,10 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
         String tableName = cmdLine.getOptionValue(TABLE_NAME_OPT.getOpt());
         String schemaName = cmdLine.getOptionValue(SCHEMA_NAME_OPT.getOpt());
         String indexTableName = cmdLine.getOptionValue(INDEX_TABLE_NAME_OPT.getOpt());
-        String qualifiedTableName = getQualifiedTableName(schemaName, tableName);
+        String qualifiedTableName = SchemaUtil.getQualifiedTableName(schemaName, tableName);
         String qualifiedIndexTableName = null;
         if (indexTableName != null){
-            qualifiedIndexTableName = getQualifiedTableName(schemaName, indexTableName);
+            qualifiedIndexTableName = SchemaUtil.getQualifiedTableName(schemaName, indexTableName);
         }
 
         if (cmdLine.hasOption(ZK_QUORUM_OPT.getOpt())) {
@@ -342,23 +342,6 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
     }
 
     /**
-     * Calculate the HBase HTable name for which the import is to be done.
-     *
-     * @param schemaName import schema name, can be null
-     * @param tableName import table name
-     * @return the byte representation of the import HTable
-     */
-    @VisibleForTesting
-    static String getQualifiedTableName(String schemaName, String tableName) {
-        if (schemaName != null) {
-            return String.format("%s.%s", SchemaUtil.normalizeIdentifier(schemaName),
-                    SchemaUtil.normalizeIdentifier(tableName));
-        } else {
-            return SchemaUtil.normalizeIdentifier(tableName);
-        }
-    }
-
-    /**
      * Perform any required validation on the table being bulk loaded into:
      * - ensure no column family names start with '_', as they'd be ignored leading to problems.
      * @throws java.sql.SQLException
@@ -395,13 +378,8 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
         PTable table = PhoenixRuntime.getTable(conn, qualifiedTableName);
         List<TargetTableRef> indexTables = new ArrayList<TargetTableRef>();
         for(PTable indexTable : table.getIndexes()){
-            if (indexTable.getIndexType() == PTable.IndexType.LOCAL) {
-                indexTables.add(new TargetTableRef(indexTable.getName().getString(),
-                        Bytes.toString(MetaDataUtil.getLocalIndexPhysicalName(table.getPhysicalName().getBytes()))));
-            } else {
-                indexTables.add(
-                        new TargetTableRef(indexTable.getName().getString(), indexTable.getPhysicalName().getString()));
-            }
+            indexTables.add(new TargetTableRef(indexTable.getName().getString(), indexTable
+                    .getPhysicalName().getString()));
         }
         return indexTables;
     }

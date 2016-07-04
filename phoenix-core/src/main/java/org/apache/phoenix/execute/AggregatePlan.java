@@ -41,7 +41,6 @@ import org.apache.phoenix.iterate.ConcatResultIterator;
 import org.apache.phoenix.iterate.DistinctAggregatingResultIterator;
 import org.apache.phoenix.iterate.FilterAggregatingResultIterator;
 import org.apache.phoenix.iterate.GroupedAggregatingResultIterator;
-import org.apache.phoenix.iterate.RowKeyOrderedAggregateResultIterator;
 import org.apache.phoenix.iterate.LimitingResultIterator;
 import org.apache.phoenix.iterate.MergeSortRowKeyResultIterator;
 import org.apache.phoenix.iterate.OffsetResultIterator;
@@ -52,6 +51,7 @@ import org.apache.phoenix.iterate.ParallelIterators;
 import org.apache.phoenix.iterate.ParallelScanGrouper;
 import org.apache.phoenix.iterate.PeekingResultIterator;
 import org.apache.phoenix.iterate.ResultIterator;
+import org.apache.phoenix.iterate.RowKeyOrderedAggregateResultIterator;
 import org.apache.phoenix.iterate.SequenceResultIterator;
 import org.apache.phoenix.iterate.SerialIterators;
 import org.apache.phoenix.iterate.SpoolingResultIterator;
@@ -61,7 +61,6 @@ import org.apache.phoenix.parse.HintNode;
 import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
-import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTable.IndexType;
 import org.apache.phoenix.schema.TableRef;
 import org.apache.phoenix.schema.types.PInteger;
@@ -82,6 +81,7 @@ public class AggregatePlan extends BaseQueryPlan {
     private List<KeyRange> splits;
     private List<List<Scan>> scans;
     private static final Logger logger = LoggerFactory.getLogger(AggregatePlan.class);
+    private boolean isSerial;
     
 
     public AggregatePlan(StatementContext context, FilterableStatement statement, TableRef table,
@@ -99,6 +99,12 @@ public class AggregatePlan extends BaseQueryPlan {
                 orderBy, groupBy, parallelIteratorFactory, dynamicFilter);
         this.having = having;
         this.aggregators = context.getAggregationManager().getAggregators();
+        boolean hasSerialHint = statement.getHint().hasHint(HintNode.Hint.SERIAL);
+        boolean canBeExecutedSerially = ScanUtil.canQueryBeExecutedSerially(table.getTable(), orderBy, context); 
+        if (hasSerialHint && !canBeExecutedSerially) {
+            logger.warn("This query cannot be executed serially. Ignoring the hint");
+        }
+        this.isSerial = hasSerialHint && canBeExecutedSerially;
     }
 
     public Expression getHaving() {
@@ -206,15 +212,9 @@ public class AggregatePlan extends BaseQueryPlan {
                         PInteger.INSTANCE.toBytes(limit + (offset == null ? 0 : offset)));
             }
         }
-        PTable table = tableRef.getTable();
-        boolean hasSerialHint = statement.getHint().hasHint(HintNode.Hint.SERIAL);
-        boolean canBeExecutedSerially = ScanUtil.canQueryBeExecutedSerially(table, orderBy, context); 
-        if (hasSerialHint && !canBeExecutedSerially) {
-            logger.warn("This query cannot be executed serially. Ignoring the hint");
-        }
-        BaseResultIterators iterators = hasSerialHint && canBeExecutedSerially
+        BaseResultIterators iterators = isSerial
                 ? new SerialIterators(this, null, null, wrapParallelIteratorFactory(), scanGrouper, scan)
-                : new ParallelIterators(this, null, wrapParallelIteratorFactory(), scan);
+                : new ParallelIterators(this, null, wrapParallelIteratorFactory(), scan, false);
 
         splits = iterators.getSplits();
         scans = iterators.getScans();
@@ -229,7 +229,8 @@ public class AggregatePlan extends BaseQueryPlan {
         } else if (groupBy.isOrderPreserving() && !(this.getTableRef().getTable().getBucketNum() != null || this.getTableRef().getTable().getIndexType() == IndexType.LOCAL)) {
             aggResultIterator = new RowKeyOrderedAggregateResultIterator(iterators, aggregators);
         } else {
-            aggResultIterator = new GroupedAggregatingResultIterator(new MergeSortRowKeyResultIterator(iterators), aggregators);            
+            aggResultIterator = new GroupedAggregatingResultIterator(
+                    new MergeSortRowKeyResultIterator(iterators, 0, this.getOrderBy() == OrderBy.REV_ROW_KEY_ORDER_BY),aggregators);
         }
 
         if (having != null) {
@@ -263,5 +264,10 @@ public class AggregatePlan extends BaseQueryPlan {
     @Override
     public boolean useRoundRobinIterator() throws SQLException {
         return false;
+    }
+
+    @Override
+    public boolean isSerial() {
+        return isSerial;
     }
 }

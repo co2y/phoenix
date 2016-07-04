@@ -107,7 +107,7 @@ public class DeleteCompiler {
         PName tenantId = connection.getTenantId();
         byte[] tenantIdBytes = null;
         if (tenantId != null) {
-            tenantIdBytes = ScanUtil.getTenantIdBytes(table.getRowKeySchema(), table.getBucketNum() != null, tenantId);
+            tenantIdBytes = ScanUtil.getTenantIdBytes(table.getRowKeySchema(), table.getBucketNum() != null, tenantId, table.getViewIndexId() != null);
         }
         final boolean isAutoCommit = connection.getAutoCommit();
         ConnectionQueryServices services = connection.getQueryServices();
@@ -125,11 +125,11 @@ public class DeleteCompiler {
         boolean isSharedViewIndex = table.getViewIndexId() != null;
         int offset = (table.getBucketNum() == null ? 0 : 1);
         byte[][] values = new byte[pkColumns.size()][];
-        if (isMultiTenant) {
-            values[offset++] = tenantIdBytes;
-        }
         if (isSharedViewIndex) {
             values[offset++] = MetaDataUtil.getViewIndexIdDataType().toBytes(table.getViewIndexId());
+        }
+        if (isMultiTenant) {
+            values[offset++] = tenantIdBytes;
         }
         try (PhoenixResultSet rs = new PhoenixResultSet(iterator, projector, childContext)) {
             int rowCount = 0;
@@ -182,7 +182,7 @@ public class DeleteCompiler {
             }
 
             // If auto commit is true, this last batch will be committed upon return
-            int nCommittedRows = rowCount / batchSize * batchSize;
+            int nCommittedRows = isAutoCommit ? (rowCount / batchSize * batchSize) : 0;
             MutationState state = new MutationState(targetTableRef, mutations, nCommittedRows, maxSize, connection);
             if (indexTableRef != null) {
                 // To prevent the counting of these index rows, we have a negative for remainingRows.

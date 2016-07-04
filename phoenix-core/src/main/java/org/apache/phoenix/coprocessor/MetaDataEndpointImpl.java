@@ -198,8 +198,6 @@ import org.apache.phoenix.schema.SequenceNotFoundException;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.TableNotFoundException;
 import org.apache.phoenix.schema.TableRef;
-import org.apache.phoenix.schema.stats.PTableStats;
-import org.apache.phoenix.schema.stats.StatisticsUtil;
 import org.apache.phoenix.schema.tuple.ResultTuple;
 import org.apache.phoenix.schema.types.PBinary;
 import org.apache.phoenix.schema.types.PBoolean;
@@ -951,30 +949,13 @@ public class MetaDataEndpointImpl extends MetaDataProtocol implements Coprocesso
               addColumnToTable(results, colName, famName, colKeyValues, columns, saltBucketNum != null);
           }
         }
-        PName physicalTableName = physicalTables.isEmpty() ? PNameFactory.newName(SchemaUtil.getPhysicalTableName(
-                Bytes.toBytes(SchemaUtil.getTableName(schemaName.getBytes(), tableName.getBytes())), isNamespaceMapped)
-                .getNameAsString()) : physicalTables.get(0);
-        PTableStats stats = PTableStats.EMPTY_STATS;
-        if (tenantId == null) {
-            HTableInterface statsHTable = null;
-            try {
-                statsHTable = ServerUtil.getHTableForCoprocessorScan(env,
-                        SchemaUtil.getPhysicalTableName(PhoenixDatabaseMetaData.SYSTEM_STATS_NAME_BYTES, env.getConfiguration())
-                                .getName());
-                stats = StatisticsUtil.readStatistics(statsHTable, physicalTableName.getBytes(), clientTimeStamp);
-                timeStamp = Math.max(timeStamp, stats.getTimestamp());
-            } catch (org.apache.hadoop.hbase.TableNotFoundException e) {
-                logger.warn(SchemaUtil.getPhysicalTableName(PhoenixDatabaseMetaData.SYSTEM_STATS_NAME_BYTES,
-                        env.getConfiguration()) + " not online yet?");
-            } finally {
-                if (statsHTable != null) statsHTable.close();
-            }
-        }
+        // Avoid querying the stats table because we're holding the rowLock here. Issuing an RPC to a remote
+        // server while holding this lock is a bad idea and likely to cause contention.
         return PTableImpl.makePTable(tenantId, schemaName, tableName, tableType, indexState, timeStamp, tableSeqNum,
                 pkName, saltBucketNum, columns, tableType == INDEX ? schemaName : null,
                 tableType == INDEX ? dataTableName : null, indexes, isImmutableRows, physicalTables, defaultFamilyName,
                 viewStatement, disableWAL, multiTenant, storeNulls, viewType, viewIndexId, indexType,
-                rowKeyOrderOptimizable, transactional, updateCacheFrequency, stats, baseColumnCount,
+                rowKeyOrderOptimizable, transactional, updateCacheFrequency, baseColumnCount,
                 indexDisableTimestamp, isNamespaceMapped, autoPartitionSeq, isAppendOnlySchema);
     }
 
@@ -1452,8 +1433,8 @@ public class MetaDataEndpointImpl extends MetaDataProtocol implements Coprocesso
                     props.setProperty(PhoenixRuntime.NO_UPGRADE_ATTRIB, Boolean.TRUE.toString());
                     try (PhoenixConnection connection = DriverManager.getConnection(MetaDataUtil.getJdbcUrl(env), props).unwrap(PhoenixConnection.class);
                             Statement stmt = connection.createStatement()) {
-                        String seqNextValueSql = String.format("SELECT NEXT VALUE FOR %s FROM %s LIMIT 1",
-                            SchemaUtil.getTableName(parentTable.getSchemaName().getString(), parentTable.getAutoPartitionSeqName()), PhoenixDatabaseMetaData.SYSTEM_CATALOG_NAME);
+                        String seqName = parentTable.getAutoPartitionSeqName();
+                        String seqNextValueSql = String.format("SELECT NEXT VALUE FOR %s", seqName);
                         ResultSet rs = stmt.executeQuery(seqNextValueSql);
                         rs.next();
                         autoPartitionNum = rs.getLong(1);
@@ -1608,7 +1589,7 @@ public class MetaDataEndpointImpl extends MetaDataProtocol implements Coprocesso
                     }
                     results.add(result);
                 }
-                TableViewFinderResult tableViewFinderResult = new TableViewFinderResult(results);
+                TableViewFinderResult tableViewFinderResult = new TableViewFinderResult(results, table);
                 if (numOfChildViews > 0 && !allViewsInCurrentRegion) {
                     tableViewFinderResult.setAllViewsNotInSingleRegion();
                 }
@@ -3377,13 +3358,21 @@ public class MetaDataEndpointImpl extends MetaDataProtocol implements Coprocesso
 
         private List<Result> results = Lists.newArrayList();
         private boolean allViewsNotInSingleRegion = false;
+        private PTable table;
 
-        private TableViewFinderResult(List<Result> results) {
+        private TableViewFinderResult(List<Result> results, PTable table) {
             this.results = results;
+            this.table = table;
         }
 
         public boolean hasViews() {
-            return results.size() > 0;
+            int localIndexesCount = 0;
+            for(PTable index : table.getIndexes()) {
+                if(index.getIndexType().equals(IndexType.LOCAL)) {
+                    localIndexesCount++;
+                }
+            }
+            return results.size()-localIndexesCount > 0;
         }
 
         private void setAllViewsNotInSingleRegion() {

@@ -26,11 +26,13 @@
     <module>phoenix-core</module>
     <module>phoenix-flume</module>
     <module>phoenix-pig</module>
-    <module>phoenix-server-client</module>
-    <module>phoenix-server</module>
+    <module>phoenix-queryserver-client</module>
+    <module>phoenix-queryserver</module>
     <module>phoenix-pherf</module>
     <module>phoenix-spark</module>
     <module>phoenix-hive</module>
+    <module>phoenix-client</module>
+    <module>phoenix-server</module>
     <module>phoenix-assembly</module>
     <module>phoenix-tracing-webapp</module>
   </modules>
@@ -93,10 +95,10 @@
     <!-- Do not change jodatime.version until HBASE-15199 is fixed -->
     <jodatime.version>1.6</jodatime.version>
     <joni.version>2.1.2</joni.version>
-    <avatica.version>1.7.1</avatica.version>
+    <avatica.version>1.8.0</avatica.version>
     <jettyVersion>8.1.7.v20120910</jettyVersion>
-    <tephra.version>0.7.0</tephra.version>
-    <spark.version>1.5.2</spark.version>
+    <tephra.version>0.8.0-incubating</tephra.version>
+    <spark.version>1.6.1</spark.version>
     <scala.version>2.10.4</scala.version>
     <scala.binary.version>2.10</scala.binary.version>
 
@@ -160,6 +162,11 @@
               </pluginExecutions>
             </lifecycleMappingMetadata>
           </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-install-plugin</artifactId>
+          <version>2.5.2</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -340,6 +347,11 @@
             </execution>
           </executions>
         </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-shade-plugin</artifactId>
+          <version>2.4.3</version>
+        </plugin>
       </plugins>
     </pluginManagement>
 
@@ -478,12 +490,12 @@
       </dependency>
       <dependency>
         <groupId>org.apache.phoenix</groupId>
-        <artifactId>phoenix-server</artifactId>
+        <artifactId>phoenix-queryserver</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.apache.phoenix</groupId>
-        <artifactId>phoenix-server-client</artifactId>
+        <artifactId>phoenix-queryserver-client</artifactId>
         <version>${project.version}</version>
       </dependency>
 
@@ -503,6 +515,10 @@
           <exclusion>
             <groupId>org.jruby</groupId>
             <artifactId>jruby-complete</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-hdfs</artifactId>
           </exclusion>
         </exclusions>
       </dependency>
@@ -634,6 +650,11 @@
       </dependency>
       <dependency>
         <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-client</artifactId>
+        <version>${hadoop-two.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-hdfs</artifactId>
         <version>${hadoop-two.version}</version>
       </dependency>
@@ -641,7 +662,8 @@
         <groupId>org.apache.hadoop</groupId>
         <artifactId>hadoop-hdfs</artifactId>
         <version>${hadoop-two.version}</version>
-        <type>test-jar</type>
+        <type>test-jar</type> <!-- this does not work which is typical for maven.-->
+        <scope>test</scope>
       </dependency>
 
       <!-- General Dependencies -->
@@ -670,12 +692,12 @@
 
       <!-- Transaction dependencies -->
       <dependency>
-        <groupId>co.cask.tephra</groupId>
+        <groupId>org.apache.tephra</groupId>
         <artifactId>tephra-api</artifactId>
         <version>${tephra.version}</version>
       </dependency>
       <dependency>
-        <groupId>co.cask.tephra</groupId>
+        <groupId>org.apache.tephra</groupId>
         <artifactId>tephra-core</artifactId>
         <version>${tephra.version}</version>
         <exclusions>
@@ -690,7 +712,7 @@
         </exclusions>
       </dependency>
       <dependency>
-        <groupId>co.cask.tephra</groupId>
+        <groupId>org.apache.tephra</groupId>
         <artifactId>tephra-core</artifactId>
         <type>test-jar</type>
         <version>${tephra.version}</version>
@@ -707,17 +729,12 @@
         </exclusions>
       </dependency>
       <dependency>
-        <groupId>co.cask.tephra</groupId>
+        <groupId>org.apache.tephra</groupId>
         <artifactId>tephra-hbase-compat-1.1</artifactId>
         <version>${tephra.version}</version>
       </dependency>
 
       <!-- Make sure we have all the antlr dependencies -->
-      <dependency>
-        <groupId>org.antlr</groupId>
-        <artifactId>antlr</artifactId>
-        <version>${antlr.version}</version>
-      </dependency>
       <dependency>
         <groupId>org.antlr</groupId>
         <artifactId>antlr-runtime</artifactId>

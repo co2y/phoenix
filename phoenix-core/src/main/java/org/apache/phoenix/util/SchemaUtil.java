@@ -641,7 +641,7 @@ public class SchemaUtil {
         if (tableName == null) {
             return null;
         }
-        if (isExistingTableMappedToPhoenixName(Bytes.toString(tableName))) { return normalizeIdentifier(Bytes.toString(tableName)); }
+        if (isExistingTableMappedToPhoenixName(Bytes.toString(tableName))) { return Bytes.toString(tableName); }
         int index = indexOf(tableName, QueryConstants.NAME_SEPARATOR_BYTE);
         if (index < 0) {
             index = indexOf(tableName, QueryConstants.NAMESPACE_SEPARATOR_BYTE);
@@ -651,7 +651,7 @@ public class SchemaUtil {
     }
 
     public static String getTableNameFromFullName(String tableName) {
-        if (isExistingTableMappedToPhoenixName(tableName)) { return normalizeIdentifier(tableName); }
+        if (isExistingTableMappedToPhoenixName(tableName)) { return tableName; }
         if (tableName.contains(QueryConstants.NAMESPACE_SEPARATOR)) { return getTableNameFromFullName(tableName,
                 QueryConstants.NAMESPACE_SEPARATOR); }
         return getTableNameFromFullName(tableName, QueryConstants.NAME_SEPARATOR);
@@ -1024,5 +1024,21 @@ public class SchemaUtil {
     private static String getStrippedName(String physicalTableName, String indexPrefix) {
         return physicalTableName.indexOf(indexPrefix) == 0 ? physicalTableName.substring(indexPrefix.length())
                 : physicalTableName;
+    }
+
+    /**
+     * Calculate the HBase HTable name.
+     *
+     * @param schemaName import schema name, can be null
+     * @param tableName import table name
+     * @return the byte representation of the HTable
+     */
+    public static String getQualifiedTableName(String schemaName, String tableName) {
+        if (schemaName != null) {
+            return String.format("%s.%s", normalizeIdentifier(schemaName),
+                    normalizeIdentifier(tableName));
+        } else {
+            return normalizeIdentifier(tableName);
+        }
     }
 }
